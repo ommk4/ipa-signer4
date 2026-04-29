@@ -1,0 +1,6 @@
+{
+  "name": "IPA Distribution Platform",
+  "description": "A production-ready platform for hosting, signing, and installing custom iOS applications using Apple Mobile Device Management profiles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
