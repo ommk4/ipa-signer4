@@ -36,7 +36,6 @@ async function saveDb() {
 
 async function initDB() {
   const SQL = await initSqlJs();
-  // Try to load existing DB, or create new one
   try {
     const fileBuffer = await fs.readFile(DB_PATH);
     db = new SQL.Database(fileBuffer);
@@ -44,7 +43,6 @@ async function initDB() {
     db = new SQL.Database();
   }
 
-  // Create tables
   db.run(`
     CREATE TABLE IF NOT EXISTS devices (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,7 +74,6 @@ async function initDB() {
   await saveDb();
 }
 
-// macOS IPA Signing Implementation (unchanged)
 async function signIpa(rawIpaPath: string, udid: string, bundleId: string): Promise<string> {
   const signedDir = path.join(process.cwd(), 'apps', 'signed');
   await fs.mkdir(signedDir, { recursive: true });
@@ -242,6 +239,7 @@ async function startServer() {
     res.send(mobileConfig);
   });
 
+  // ── Callback Handler مع تسجيل للأخطاء ──
   app.post("/api/enroll/callback", rawParser, (req, res) => {
     let rawBody = "";
     if (Buffer.isBuffer(req.body)) {
@@ -250,29 +248,41 @@ async function startServer() {
       rawBody = req.body;
     }
     
+    console.log("📩 Received enrollment callback body length:", rawBody.length);
+    console.log("📋 Raw body (first 500 chars):", rawBody.substring(0, 500));
+    
+    // إزالة الأحرف الفارغة
     rawBody = rawBody.replace(/\0/g, '');
+    
+    // محاولة استخراج UDID
     const udidMatch = rawBody.match(/<key>UDID<\/key>[\s]*<string>([a-zA-Z0-9\-]+)<\/string>/i);
     const deviceNameMatch = rawBody.match(/<key>PRODUCT<\/key>[\s]*<string>([^<]+)<\/string>/i);
     
     let udid = udidMatch ? udidMatch[1] : null;
     let device_name = deviceNameMatch ? deviceNameMatch[1] : 'iPhone';
 
-    if (!udid) {
-      if (req.body && typeof req.body === 'object' && req.body.udid) {
-        udid = req.body.udid;
-        device_name = req.body.device_name || 'iPhone';
+    // Fallback لو كان JSON
+    if (!udid && req.body && typeof req.body === 'object' && req.body.udid) {
+      udid = req.body.udid;
+      device_name = req.body.device_name || 'iPhone';
+    }
+
+    if (udid) {
+      console.log("✅ Extracted UDID:", udid, "Device:", device_name);
+      try {
+        db.run("INSERT OR IGNORE INTO devices (udid, device_name) VALUES (?, ?)", [udid, device_name]);
+        saveDb();
+      } catch (e) {
+        console.error("Enrollment DB Error:", e);
       }
+      // توجيه ناجح
+      return res.redirect(301, `${appUrlBase}/?enrolled_udid=${udid}`);
+    } else {
+      console.error("❌ Failed to extract UDID. Raw body saved in logs.");
+      // لكي لا يفشل تثبيت البروفايل، نعيد توجيه إلى الصفحة الرئيسية مع رسالة خطأ
+      // سترى التفاصيل في سجلات Render
+      return res.redirect(301, `${appUrlBase}/?error=no_udid`);
     }
-
-    if (!udid) return res.status(400).send('Missing UDID in profile data');
-
-    try {
-      db.run("INSERT OR IGNORE INTO devices (udid, device_name) VALUES (?, ?)", [udid, device_name]);
-      saveDb();
-    } catch (e: any) {
-      console.error("Enrollment DB Error:", e);
-    }
-    res.redirect(301, `${appUrlBase}/?enrolled_udid=${udid}`);
   });
 
   app.post("/api/install/:appId/:udid", async (req, res) => {
@@ -353,7 +363,6 @@ async function startServer() {
     }
   });
 
-  // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
