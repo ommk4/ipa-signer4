@@ -27,7 +27,6 @@ const storage = multer.diskStorage({
 });
 const upload = multer({ storage });
 
-// Helper to save database to file
 async function saveDb() {
   const data = db.export();
   const buffer = Buffer.from(data);
@@ -96,7 +95,7 @@ async function signIpa(rawIpaPath: string, udid: string, bundleId: string): Prom
       throw new Error('Not running on macOS');
     }
   } catch (error) {
-    console.warn("Real codesign failed or not running on macOS. Mocking success for demo...", error);
+    console.warn("Real codesign failed or not running on macOS. Mocking success...", error);
     await fs.writeFile(signedIpaPath, 'fake-signed-ipa-content');
   }
 
@@ -135,6 +134,33 @@ function generateManifestContent(appUrl: string, bundleId: string, version: stri
   </array>
 </dict>
 </plist>`;
+}
+
+// 🔹 دالة توقيع ملف mobileconfig
+async function signMobileConfig(unsignedXml: string) {
+  const unsignedPath = `/tmp/unsigned_${Date.now()}.mobileconfig`;
+  const signedPath = `/tmp/signed_${Date.now()}.mobileconfig`;
+
+  await fs.writeFile(unsignedPath, unsignedXml);
+
+  // استخدم الملفات السرية من /etc/secrets
+  const certPath = '/etc/secrets/cert.pem';
+  const keyPath = '/etc/secrets/key.pem';
+
+  // الأمر openssl لتوقيع الملف
+  const cmd = `openssl smime -sign -in "${unsignedPath}" -out "${signedPath}" -outform der -signer "${certPath}" -inkey "${keyPath}"`;
+
+  try {
+    await execAsync(cmd);
+    const signedContent = await fs.readFile(signedPath);
+    // تنظيف
+    await fs.unlink(unsignedPath);
+    await fs.unlink(signedPath);
+    return signedContent;
+  } catch (error) {
+    console.error("❌ Profile signing failed:", error);
+    throw error;
+  }
 }
 
 async function startServer() {
@@ -202,7 +228,7 @@ async function startServer() {
     }
   });
 
-  app.get("/api/enroll", (req, res) => {
+  app.get("/api/enroll", async (req, res) => {
     const mobileConfig = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -234,12 +260,19 @@ async function startServer() {
   <string>Profile Service</string>
 </dict>
 </plist>`;
-    res.setHeader('Content-Type', 'application/x-apple-aspen-config');
-    res.setHeader('Content-Disposition', 'attachment; filename="register.mobileconfig"');
-    res.send(mobileConfig);
+
+    try {
+      // توقيع البروفايل
+      const signedData = await signMobileConfig(mobileConfig);
+      res.setHeader('Content-Type', 'application/x-apple-aspen-config');
+      res.setHeader('Content-Disposition', 'attachment; filename="register.mobileconfig"');
+      res.send(signedData);
+    } catch (err) {
+      console.error("Could not sign profile:", err);
+      res.status(500).send("Profile signing failed");
+    }
   });
 
-  // ── Callback Handler مع تسجيل للأخطاء ──
   app.post("/api/enroll/callback", rawParser, (req, res) => {
     let rawBody = "";
     if (Buffer.isBuffer(req.body)) {
@@ -248,41 +281,27 @@ async function startServer() {
       rawBody = req.body;
     }
     
-    console.log("📩 Received enrollment callback body length:", rawBody.length);
-    console.log("📋 Raw body (first 500 chars):", rawBody.substring(0, 500));
-    
-    // إزالة الأحرف الفارغة
+    console.log("📩 Enroll callback length:", rawBody.length);
     rawBody = rawBody.replace(/\0/g, '');
-    
-    // محاولة استخراج UDID
     const udidMatch = rawBody.match(/<key>UDID<\/key>[\s]*<string>([a-zA-Z0-9\-]+)<\/string>/i);
     const deviceNameMatch = rawBody.match(/<key>PRODUCT<\/key>[\s]*<string>([^<]+)<\/string>/i);
     
     let udid = udidMatch ? udidMatch[1] : null;
     let device_name = deviceNameMatch ? deviceNameMatch[1] : 'iPhone';
 
-    // Fallback لو كان JSON
     if (!udid && req.body && typeof req.body === 'object' && req.body.udid) {
       udid = req.body.udid;
       device_name = req.body.device_name || 'iPhone';
     }
 
     if (udid) {
-      console.log("✅ Extracted UDID:", udid, "Device:", device_name);
       try {
         db.run("INSERT OR IGNORE INTO devices (udid, device_name) VALUES (?, ?)", [udid, device_name]);
         saveDb();
-      } catch (e) {
-        console.error("Enrollment DB Error:", e);
-      }
-      // توجيه ناجح
+      } catch (e) { console.error(e); }
       return res.redirect(301, `${appUrlBase}/?enrolled_udid=${udid}`);
-    } else {
-      console.error("❌ Failed to extract UDID. Raw body saved in logs.");
-      // لكي لا يفشل تثبيت البروفايل، نعيد توجيه إلى الصفحة الرئيسية مع رسالة خطأ
-      // سترى التفاصيل في سجلات Render
-      return res.redirect(301, `${appUrlBase}/?error=no_udid`);
     }
+    return res.redirect(301, `${appUrlBase}/?error=no_udid`);
   });
 
   app.post("/api/install/:appId/:udid", async (req, res) => {
