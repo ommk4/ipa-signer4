@@ -10,7 +10,7 @@ import multer from 'multer';
 
 const execAsync = util.promisify(exec);
 const db = new sqlite3.Database('./database.sqlite');
-const PORT = 3000;
+const PORT = process.env.PORT || 3000; // <-- التعديل هنا
 
 // Set up storage
 const storage = multer.diskStorage({
